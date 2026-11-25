@@ -1,0 +1,239 @@
+# Project 1 — Unified Crypto Wallet
+## Security review: API keys, wallet secrets, and network data flow
+
+**Review date:** 2026-11-25  
+**Repository reviewed:** `GitHub2543/MEWconnect-web-client` (default branch `master`)  
+**Project context:** Project 1 is the Unified Crypto Wallet: a read-only multi-chain dashboard for BTC/ETH/SOL. The agreed integration direction is to preserve the existing MEWconnect core and add multi-chain read-only functionality as a separate module.  
+**Review type:** Static source-code review of the repository snapshot; not a live-device, production, or network-traffic assessment.
+
+## Executive summary
+
+- No verified API key, mnemonic, seed phrase, or private key was found being transmitted to the Monarch domain `monarch-member-bureau.web.app` in the source files reviewed.
+- No direct code reference to that domain was found in the reviewed project context. This does **not** prove what happened on the user's Redmi device or what a third-party website collected.
+- A concrete hardening concern exists: debug statements in the Ethereum provider log transaction objects, signed raw transactions, and an `eth_sign` result. Whether those logs are emitted depends on the runtime debug configuration. Disable production debug output and redact sensitive payloads.
+- `WalletInterface` holds a private key in an in-memory object and exposes getter methods. This is not, by itself, evidence of network exfiltration or persistent storage, but it increases the importance of keeping the object out of logs, analytics, crash reports, and untrusted application contexts.
+- This review did not establish that an API key was compromised. No credential values are included in this report.
+
+## Scope and evidence
+
+Reviewed files in `GitHub2543/MEWconnect-web-client`:
+
+| File | Relevant observation |
+|---|---|
+| `src/connectProvider/web3Provider/WalletInterface.js` | Stores `_privKey` as `this.privateKey`; exposes `getPrivateKey()` and `getPrivateKeyString()`; signs messages locally with `ecsign`. |
+| `src/connectProvider/web3Provider/web3-provider/methods/eth_sendTransaction.js` | Debug statements include the transaction object, transformed transaction, and `_response.rawTransaction`. |
+| `src/connectProvider/web3Provider/web3-provider/methods/eth_sign.js` | Debug statement includes the signing result. |
+| `src/connectProvider/web3Provider/web3-provider/methods/personal_sign.js` | Debug logging records request rejection; no secret value was observed in the matched lines. |
+| `src/connectProvider/web3Provider/MEWconnect/index.js` | Uses `https://connect.mewapi.io` as the V1 signaling URL and relays signing requests through the MEWconnect session. |
+| `src/connectProvider/web3Provider/web3-provider/providers/http-provider.js` | Routes JSON-RPC requests through middleware and an HTTP request manager. |
+
+Source links:
+- [WalletInterface.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/WalletInterface.js)
+- [eth_sendTransaction.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/methods/eth_sendTransaction.js)
+- [eth_sign.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/methods/eth_sign.js)
+- [personal_sign.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/methods/personal_sign.js)
+- [MEWconnect/index.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/MEWconnect/index.js)
+- [http-provider.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/providers/http-provider.js)
+
+## Findings and severity
+
+### F-01 — Sensitive transaction data can enter debug logs
+**Severity:** Medium (conditional on debug output being enabled)
+
+The transaction middleware contains debug calls for the raw transaction object, a transformed transaction, and the signed raw transaction before broadcast. The `eth_sign` handler also logs the returned signature result.
+
+**Risk:** If debug namespaces are enabled in a production build or logs are collected by a host application, diagnostics could retain transaction details or signatures. This is not evidence that a third party received them.
+
+**Recommended fix:**
+1. Disable debug namespaces in production builds.
+2. Remove logs of transaction objects, raw signed transactions, and signature results.
+3. If diagnostics are essential, log only request IDs, method names, and sanitized error codes.
+4. Add tests that fail if secret-bearing values are passed to the logger.
+
+### F-02 — Private key is represented in a JavaScript object
+**Severity:** Medium (design hardening; no exfiltration evidence)
+
+`WalletInterface` stores a private key in `this.privateKey` and exposes getter methods. The reviewed code signs locally. The matched code does not establish that this key is sent to a remote endpoint.
+
+**Recommended fix:**
+1. Keep private-key handling in the smallest possible isolated component.
+2. Avoid exposing raw private-key getters to general provider code; expose narrowly scoped signing operations instead.
+3. Ensure key material is excluded from logs, analytics, telemetry, crash reports, and error serialization.
+4. Add tests for accidental serialization and logging.
+
+### F-03 — Signaling and JSON-RPC network paths need endpoint allowlisting
+**Severity:** Medium (verification incomplete)
+
+The MEWconnect client uses `https://connect.mewapi.io` for V1 signaling, while the HTTP provider delegates JSON-RPC requests to its request manager. This review did not complete an exhaustive trace of all endpoint configuration, redirect behavior, and payload handling.
+
+**Recommended fix:**
+1. Document the allowed signaling and RPC hosts.
+2. Validate HTTPS and apply an explicit host allowlist where feasible.
+3. Do not send mnemonics or raw private keys through signaling or JSON-RPC.
+4. Add tests proving that only the intended public address, transaction request, and signed transaction data cross the relevant boundaries.
+
+### F-04 — Monarch domain relationship not established
+**Severity:** Informational / unconfirmed
+
+No direct reference to `monarch-member-bureau.web.app` was identified in the project files reviewed. The user previously reported entering an email address and a public BTC address on that site, but did not connect a wallet, sign a message, or send BTC.
+
+**Assessment:** The reported activity may expose the entered email and public address to the site operator. A public BTC address alone cannot authorize spending. The available evidence does not establish mnemonic/private-key theft, wallet control, or a link between the site and this repository.
+
+## Companion repository context (separate codebase)
+
+A previous static review of `ARMNOI/ecash-wallet-mobile` observed:
+- Its documented design stores a wallet mnemonic through a platform-backed KeyStore (iOS Keychain / Android Keystore-backed storage) and derives extended private material at runtime.
+- A BitWindow coin-news client uses a bearer token for a documented local backend endpoint. The endpoint-routing path should be verified to ensure that the token cannot be sent to an arbitrary remote host.
+- A remote endpoint configuration service can influence public Electrum/Esplora-style service endpoints. This creates endpoint-integrity risk if the configuration source is compromised, but is not evidence of secret exfiltration.
+
+These are observations from a separate repository and must not be treated as proof that the MEWconnect web client shares the same implementation or runtime behavior.
+
+## API key status
+
+**Status: Not confirmed compromised.** The source review described above did not establish a real exposed API key or a successful unauthorized use. This report deliberately contains no credential values. A source-code scan cannot determine whether an API key in a user's email, browser storage, device, or external service was used.
+
+If a real credential is later identified:
+1. Do not paste it into issues, chat, logs, or this repository.
+2. Revoke or rotate it through the issuing provider.
+3. Review provider audit logs and usage history.
+4. Replace it with a least-privilege credential stored in an approved secret manager or CI secret store.
+5. Remove it from the current source and address its historical exposure separately; deleting a visible string alone does not invalidate a leaked key.
+
+## Action plan
+
+- [ ] Remove or redact sensitive debug logging in `eth_sendTransaction.js` and `eth_sign.js`.
+- [ ] Review all logger, analytics, crash-reporting, and error-serialization paths for wallet secrets.
+- [ ] Reduce raw private-key getter exposure in `WalletInterface.js`.
+- [ ] Trace the full signaling and HTTP request path, including host selection and redirects.
+- [ ] Add tests ensuring mnemonics/private keys never enter network payloads or logs.
+- [ ] Keep the multi-chain read-only module separate from MEWconnect signing/session code.
+- [ ] For the read-only BTC/ETH/SOL dashboard, accept public addresses only; do not request seed phrases or private keys.
+- [ ] Verify API keys through provider-side audit logs; never test or disclose credential values in source control.
+
+## Limitations
+
+This is a bounded static review of selected files and a previously reviewed companion repository. It does not inspect the user's live Redmi device, browser storage, Gmail account state, private repositories not available to the connected GitHub account, deleted Git history, production build artifacts, server-side logs, or actual network packets. Findings are not attribution of wrongdoing to any person or organization.
+
+
+## Additional Git-history and data-flow findings (2026-11-25)
+
+### F-05 — Historical TURN credentials were committed to source
+**Severity:** High historical exposure; current validity unknown
+
+The parent of commit `85dbb765a0e6c1e533359bae5285bfe645ca1df6` contained a TURN server configuration with a username and credential in `src/connectClient/config.js`. The subsequent commit replaced the active configuration with STUN-only configuration and left the former TURN configuration commented out. The current `master` configuration also contains STUN-only settings.
+
+**Important:** The values are intentionally redacted from this report. The code history proves that credential-shaped TURN values were committed; it does not establish whether they remained valid, were abused, or exposed wallet funds. These are TURN service credentials, not a wallet seed phrase or private key.
+
+**Recommended fix:** Confirm with the TURN service owner whether the credentials were temporary/expired. If any remain valid, revoke/rotate them. Avoid storing reusable service credentials in source; issue short-lived credentials from a backend and review provider usage logs for the relevant period.
+
+Evidence:
+- [Commit that changed the TURN configuration](https://github.com/GitHub2543/MEWconnect-web-client/commit/85dbb765a0e6c1e533359bae5285bfe645ca1df6)
+- [Parent revision containing the earlier configuration](https://github.com/GitHub2543/MEWconnect-web-client/tree/0d09cfcd056d5b93224043b28caaa7354e0b58fe/src/connectClient)
+
+### F-06 — Debug logging can include connection and application payloads
+**Severity:** Medium (conditional on debug namespaces being enabled)
+
+The current source contains the following logging paths:
+- `websocketWrapper.connect()` logs the complete WebSocket URL, including query parameters. The documented query parameters include a signed connection-handshake value.
+- `websocketWrapper.send()` logs the outgoing signaling data object.
+- `WebRtcCommunication.sendRtcMessage()` logs the message before it is encrypted and sent over the WebRTC data channel.
+- `eth_sendTransaction.js` logs transaction objects and the signed raw transaction; `eth_sign.js` logs a signing result.
+
+The WebRTC application payload is encrypted before `rtcSend()` transmits it, but the preceding debug calls occur before that encryption. Browser debug output is controlled by the `debug` package's runtime namespace configuration; the presence of debug calls alone does not prove that logs were enabled or collected.
+
+**Recommended fix:**
+1. Remove payload values from debug statements, including message data, signatures, signed transactions, handshake query values, and WebSocket signaling payloads.
+2. Log only event names, request IDs, and sanitized error codes.
+3. Disable debug namespaces in production and add automated tests to prevent secret-bearing logging.
+4. Ensure crash reporting and host-page logging do not capture these values.
+
+Evidence:
+- [websocketWrapper.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/websocketWrapper.js)
+- [WebRtcCommunication.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/WebRtcCommunication.js)
+- [MewConnectCrypto.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/MewConnectCrypto.js)
+- [MewConnectInitiatorV2.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/initiator/MewConnectInitiatorV2.js)
+
+### F-07 — Historical HTTP RPC support permits non-TLS endpoints
+**Severity:** Medium (configuration-dependent)
+
+Commit `971f77c423775f1970720304d282bb4076ef4552` added HTTP JSON-RPC support and included a localhost HTTP endpoint in an example/configuration change. The current HTTP request manager posts JSON-RPC payloads to the configured host using Axios. This is not proof that the production application sent wallet secrets over cleartext HTTP.
+
+**Recommended fix:** Reject non-local `http://` endpoints in production; allow HTTPS only for remote RPC providers. Treat localhost development endpoints as a separate development-only configuration and test the production build's endpoint policy.
+
+Evidence:
+- [Commit adding HTTP RPC support](https://github.com/GitHub2543/MEWconnect-web-client/commit/971f77c423775f1970720304d282bb4076ef4552)
+- [HTTP request manager](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/providers/http-request-manager.js)
+
+## Updated assessment
+
+The strongest newly verified source-level risks are historical exposure of TURN service credentials and debug logging of connection/signing/transaction payloads. Neither establishes that a wallet mnemonic or private key was exfiltrated, that the Monarch domain received these values, or that the user's Redmi device ran a compromised build. A live-device/network assessment and provider-side audit logs would be required to establish those claims.
+
+
+## Companion wallet repository review — `ARMNOI/ecash-wallet-mobile` (2026-11-25)
+
+This section records a separate static review of the companion mobile wallet repository. It is not evidence that the two repositories share the same runtime or that either caused the reported Monarch website event.
+
+### Positive controls observed
+
+- `KeyStore.swift` documents mnemonic-only secret persistence through SkipKeychain, using iOS Keychain `WhenUnlockedThisDeviceOnly` and Android Keystore-backed storage. Private descriptors are described as runtime-derived rather than persisted in the secret store.
+- `Android/app/src/main/AndroidManifest.xml` currently sets `android:allowBackup="false"`. The Android data-extraction rules separately exclude the SkipKeychain preferences from cloud backup and device-to-device transfer.
+- `Clipboard.swift` distinguishes public clipboard copies from seed-equivalent content. Sensitive copies use iOS local-only/expiry behavior and Android sensitive-clip handling; `ClipboardPolicy` sets a 60-second lifetime.
+- The app's comments describe watch-only engine construction and loading the secret only through a sign-time closure. The code review supports the intended separation, but does not prove runtime behavior on a user's device.
+
+### F-08 — Remote backend/service URLs are not fully constrained at config parsing
+**Severity:** Medium (endpoint-integrity and privacy risk; no key-exfiltration evidence)
+
+The app fetches remote endpoint configuration from `https://drivechain.dev/config` and checks the response status and schema version. It also uses an explicit allow-list for network IDs and limits backend kinds to Electrum/Esplora. However, the reviewed `RemoteBackend` parsing/resolution path accepts a non-empty URL string without enforcing a strict scheme/host allow-list at that point. Remote CoinNews/faucet/enforcer service URLs are also stored as URL strings from the remote config. The separate user-entered backend validator is syntax-oriented and permits protocol schemes required by those clients, including HTTP for Esplora/Thunder.
+
+**Risk:** If the remote config source, its publishing pipeline, or the transport trust boundary were compromised, a malicious backend could observe wallet public descriptors/addresses and transaction queries, misreport chain data, or degrade availability. The inspected code does not establish that the mnemonic/private key is sent to these endpoints.
+
+**Recommended fix:**
+1. Enforce HTTPS for remote HTTP services and restrict backend schemes to the exact schemes required for each backend kind.
+2. Consider host allow-lists or signed config payloads for high-impact endpoint changes.
+3. Validate redirect destinations and reject unexpected scheme downgrades.
+4. Add tests proving that endpoint config cannot route a wallet to an unsupported scheme or arbitrary service host.
+5. Show the active backend host clearly in settings and surface unexpected changes to the user.
+
+Evidence:
+- [RemoteEndpointConfigService.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteEndpointConfigService.swift)
+- [RemoteEndpointConfig.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteEndpointConfig.swift)
+- [RemoteServiceOverrides.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteServiceOverrides.swift)
+- [BackendURLValidator.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Packages/WalletService/Sources/WalletService/BackendURLValidator.swift)
+
+### F-09 — Bearer-token path is intended for local development CoinNews backend
+**Severity:** Low / informational (scope-dependent)
+
+`ConnectRPCClient` adds an Authorization Bearer header when its optional `bearerToken` property is non-nil. `BitWindowCoinNewsClient` documents that token as coming from a local BitWindow development/test backend's `.auth.cookie`. The public CoinNews endpoint registry constructs its public endpoint without a token. The repository path history shows the client files were introduced in June 2026; this bounded inspection did not find a hard-coded live token in the reviewed current files.
+
+**Residual risk:** The client accepts a base URL and bearer token as separate constructor inputs. A future call site could accidentally pair a token with a non-local URL. The complete runtime call graph and deployed environment were not independently verified.
+
+**Recommended fix:** Make the authenticated local-development client a separate type or enforce loopback-only hosts whenever a bearer token is present. Add a test that rejects a token-bearing request to any non-loopback host. Never commit real `.auth.cookie` contents.
+
+Evidence:
+- [ConnectRPCClient.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/ConnectRPCClient.swift)
+- [BitWindowCoinNewsClient.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/BitWindowCoinNewsClient.swift)
+- [CoinNewsEndpointRegistry.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/CoinNewsEndpointRegistry.swift)
+
+### F-10 — FCM registration token is a device identifier, not a wallet key
+**Severity:** Low / privacy note
+
+`PushNotificationService` fetches and stores an FCM registration token in memory for display/diagnostics and subscribes the device to the `announcements` topic. The inspected logging statements report registration success/failure and do not include the token value. The FCM token should still be treated as a device/app identifier and should not be published in screenshots, issues, or public logs.
+
+Evidence:
+- [PushNotificationService.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Platform/PushNotificationService.swift)
+
+### Companion repository credential and history result
+
+- The current workflow refers to Google Services JSON and Android signing material supplied through GitHub Actions secrets; this is expected secret-injection behavior, not proof that values are committed.
+- `Darwin/fastlane/apikey.json.example` contains an explicitly illustrative placeholder, not a usable App Store Connect private key.
+- A bounded path-history query for the current `KeyStore.swift` returned its initial commit only. Path-history checks for the CoinNews RPC client returned June 2026 introduction commits. This does not substitute for scanning every historical blob, all forks, or private repository content.
+- No verified live API key, wallet mnemonic, or private key was identified in the reviewed current files. No credential value is reproduced here.
+
+### Updated overall assessment
+
+The combined Project 1 review now has three distinct classes of concern:
+1. Historical TURN service credentials and debug payload logging in the MEWconnect repository.
+2. Endpoint-integrity and privacy risks in the companion mobile wallet's remotely configurable backend/service URLs.
+3. A bearer-token code path documented for a local development backend, with a guardrail recommended to prevent accidental use against a remote host.
+
+None of these findings establishes that the user's mnemonic/private key was stolen, that Monarch received a wallet secret, or that a particular person or repository operator caused the incident. Confirming historical TURN credential validity requires the TURN service owner/provider's account and usage logs; this GitHub-only review cannot revoke or verify provider credentials.
