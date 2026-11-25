@@ -113,3 +113,57 @@ If a real credential is later identified:
 ## Limitations
 
 This is a bounded static review of selected files and a previously reviewed companion repository. It does not inspect the user's live Redmi device, browser storage, Gmail account state, private repositories not available to the connected GitHub account, deleted Git history, production build artifacts, server-side logs, or actual network packets. Findings are not attribution of wrongdoing to any person or organization.
+
+
+## Additional Git-history and data-flow findings (2026-11-25)
+
+### F-05 — Historical TURN credentials were committed to source
+**Severity:** High historical exposure; current validity unknown
+
+The parent of commit `85dbb765a0e6c1e533359bae5285bfe645ca1df6` contained a TURN server configuration with a username and credential in `src/connectClient/config.js`. The subsequent commit replaced the active configuration with STUN-only configuration and left the former TURN configuration commented out. The current `master` configuration also contains STUN-only settings.
+
+**Important:** The values are intentionally redacted from this report. The code history proves that credential-shaped TURN values were committed; it does not establish whether they remained valid, were abused, or exposed wallet funds. These are TURN service credentials, not a wallet seed phrase or private key.
+
+**Recommended fix:** Confirm with the TURN service owner whether the credentials were temporary/expired. If any remain valid, revoke/rotate them. Avoid storing reusable service credentials in source; issue short-lived credentials from a backend and review provider usage logs for the relevant period.
+
+Evidence:
+- [Commit that changed the TURN configuration](https://github.com/GitHub2543/MEWconnect-web-client/commit/85dbb765a0e6c1e533359bae5285bfe645ca1df6)
+- [Parent revision containing the earlier configuration](https://github.com/GitHub2543/MEWconnect-web-client/tree/0d09cfcd056d5b93224043b28caaa7354e0b58fe/src/connectClient)
+
+### F-06 — Debug logging can include connection and application payloads
+**Severity:** Medium (conditional on debug namespaces being enabled)
+
+The current source contains the following logging paths:
+- `websocketWrapper.connect()` logs the complete WebSocket URL, including query parameters. The documented query parameters include a signed connection-handshake value.
+- `websocketWrapper.send()` logs the outgoing signaling data object.
+- `WebRtcCommunication.sendRtcMessage()` logs the message before it is encrypted and sent over the WebRTC data channel.
+- `eth_sendTransaction.js` logs transaction objects and the signed raw transaction; `eth_sign.js` logs a signing result.
+
+The WebRTC application payload is encrypted before `rtcSend()` transmits it, but the preceding debug calls occur before that encryption. Browser debug output is controlled by the `debug` package's runtime namespace configuration; the presence of debug calls alone does not prove that logs were enabled or collected.
+
+**Recommended fix:**
+1. Remove payload values from debug statements, including message data, signatures, signed transactions, handshake query values, and WebSocket signaling payloads.
+2. Log only event names, request IDs, and sanitized error codes.
+3. Disable debug namespaces in production and add automated tests to prevent secret-bearing logging.
+4. Ensure crash reporting and host-page logging do not capture these values.
+
+Evidence:
+- [websocketWrapper.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/websocketWrapper.js)
+- [WebRtcCommunication.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/WebRtcCommunication.js)
+- [MewConnectCrypto.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/MewConnectCrypto.js)
+- [MewConnectInitiatorV2.js](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectClient/initiator/MewConnectInitiatorV2.js)
+
+### F-07 — Historical HTTP RPC support permits non-TLS endpoints
+**Severity:** Medium (configuration-dependent)
+
+Commit `971f77c423775f1970720304d282bb4076ef4552` added HTTP JSON-RPC support and included a localhost HTTP endpoint in an example/configuration change. The current HTTP request manager posts JSON-RPC payloads to the configured host using Axios. This is not proof that the production application sent wallet secrets over cleartext HTTP.
+
+**Recommended fix:** Reject non-local `http://` endpoints in production; allow HTTPS only for remote RPC providers. Treat localhost development endpoints as a separate development-only configuration and test the production build's endpoint policy.
+
+Evidence:
+- [Commit adding HTTP RPC support](https://github.com/GitHub2543/MEWconnect-web-client/commit/971f77c423775f1970720304d282bb4076ef4552)
+- [HTTP request manager](https://github.com/GitHub2543/MEWconnect-web-client/blob/master/src/connectProvider/web3Provider/web3-provider/providers/http-request-manager.js)
+
+## Updated assessment
+
+The strongest newly verified source-level risks are historical exposure of TURN service credentials and debug logging of connection/signing/transaction payloads. Neither establishes that a wallet mnemonic or private key was exfiltrated, that the Monarch domain received these values, or that the user's Redmi device ran a compromised build. A live-device/network assessment and provider-side audit logs would be required to establish those claims.
