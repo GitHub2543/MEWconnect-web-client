@@ -167,3 +167,73 @@ Evidence:
 ## Updated assessment
 
 The strongest newly verified source-level risks are historical exposure of TURN service credentials and debug logging of connection/signing/transaction payloads. Neither establishes that a wallet mnemonic or private key was exfiltrated, that the Monarch domain received these values, or that the user's Redmi device ran a compromised build. A live-device/network assessment and provider-side audit logs would be required to establish those claims.
+
+
+## Companion wallet repository review — `ARMNOI/ecash-wallet-mobile` (2026-11-25)
+
+This section records a separate static review of the companion mobile wallet repository. It is not evidence that the two repositories share the same runtime or that either caused the reported Monarch website event.
+
+### Positive controls observed
+
+- `KeyStore.swift` documents mnemonic-only secret persistence through SkipKeychain, using iOS Keychain `WhenUnlockedThisDeviceOnly` and Android Keystore-backed storage. Private descriptors are described as runtime-derived rather than persisted in the secret store.
+- `Android/app/src/main/AndroidManifest.xml` currently sets `android:allowBackup="false"`. The Android data-extraction rules separately exclude the SkipKeychain preferences from cloud backup and device-to-device transfer.
+- `Clipboard.swift` distinguishes public clipboard copies from seed-equivalent content. Sensitive copies use iOS local-only/expiry behavior and Android sensitive-clip handling; `ClipboardPolicy` sets a 60-second lifetime.
+- The app's comments describe watch-only engine construction and loading the secret only through a sign-time closure. The code review supports the intended separation, but does not prove runtime behavior on a user's device.
+
+### F-08 — Remote backend/service URLs are not fully constrained at config parsing
+**Severity:** Medium (endpoint-integrity and privacy risk; no key-exfiltration evidence)
+
+The app fetches remote endpoint configuration from `https://drivechain.dev/config` and checks the response status and schema version. It also uses an explicit allow-list for network IDs and limits backend kinds to Electrum/Esplora. However, the reviewed `RemoteBackend` parsing/resolution path accepts a non-empty URL string without enforcing a strict scheme/host allow-list at that point. Remote CoinNews/faucet/enforcer service URLs are also stored as URL strings from the remote config. The separate user-entered backend validator is syntax-oriented and permits protocol schemes required by those clients, including HTTP for Esplora/Thunder.
+
+**Risk:** If the remote config source, its publishing pipeline, or the transport trust boundary were compromised, a malicious backend could observe wallet public descriptors/addresses and transaction queries, misreport chain data, or degrade availability. The inspected code does not establish that the mnemonic/private key is sent to these endpoints.
+
+**Recommended fix:**
+1. Enforce HTTPS for remote HTTP services and restrict backend schemes to the exact schemes required for each backend kind.
+2. Consider host allow-lists or signed config payloads for high-impact endpoint changes.
+3. Validate redirect destinations and reject unexpected scheme downgrades.
+4. Add tests proving that endpoint config cannot route a wallet to an unsupported scheme or arbitrary service host.
+5. Show the active backend host clearly in settings and surface unexpected changes to the user.
+
+Evidence:
+- [RemoteEndpointConfigService.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteEndpointConfigService.swift)
+- [RemoteEndpointConfig.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteEndpointConfig.swift)
+- [RemoteServiceOverrides.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Config/RemoteServiceOverrides.swift)
+- [BackendURLValidator.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Packages/WalletService/Sources/WalletService/BackendURLValidator.swift)
+
+### F-09 — Bearer-token path is intended for local development CoinNews backend
+**Severity:** Low / informational (scope-dependent)
+
+`ConnectRPCClient` adds an Authorization Bearer header when its optional `bearerToken` property is non-nil. `BitWindowCoinNewsClient` documents that token as coming from a local BitWindow development/test backend's `.auth.cookie`. The public CoinNews endpoint registry constructs its public endpoint without a token. The repository path history shows the client files were introduced in June 2026; this bounded inspection did not find a hard-coded live token in the reviewed current files.
+
+**Residual risk:** The client accepts a base URL and bearer token as separate constructor inputs. A future call site could accidentally pair a token with a non-local URL. The complete runtime call graph and deployed environment were not independently verified.
+
+**Recommended fix:** Make the authenticated local-development client a separate type or enforce loopback-only hosts whenever a bearer token is present. Add a test that rejects a token-bearing request to any non-loopback host. Never commit real `.auth.cookie` contents.
+
+Evidence:
+- [ConnectRPCClient.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/ConnectRPCClient.swift)
+- [BitWindowCoinNewsClient.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/BitWindowCoinNewsClient.swift)
+- [CoinNewsEndpointRegistry.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/CoinNews/CoinNewsEndpointRegistry.swift)
+
+### F-10 — FCM registration token is a device identifier, not a wallet key
+**Severity:** Low / privacy note
+
+`PushNotificationService` fetches and stores an FCM registration token in memory for display/diagnostics and subscribes the device to the `announcements` topic. The inspected logging statements report registration success/failure and do not include the token value. The FCM token should still be treated as a device/app identifier and should not be published in screenshots, issues, or public logs.
+
+Evidence:
+- [PushNotificationService.swift](https://github.com/ARMNOI/ecash-wallet-mobile/blob/main/Sources/ECashWalletMobile/Platform/PushNotificationService.swift)
+
+### Companion repository credential and history result
+
+- The current workflow refers to Google Services JSON and Android signing material supplied through GitHub Actions secrets; this is expected secret-injection behavior, not proof that values are committed.
+- `Darwin/fastlane/apikey.json.example` contains an explicitly illustrative placeholder, not a usable App Store Connect private key.
+- A bounded path-history query for the current `KeyStore.swift` returned its initial commit only. Path-history checks for the CoinNews RPC client returned June 2026 introduction commits. This does not substitute for scanning every historical blob, all forks, or private repository content.
+- No verified live API key, wallet mnemonic, or private key was identified in the reviewed current files. No credential value is reproduced here.
+
+### Updated overall assessment
+
+The combined Project 1 review now has three distinct classes of concern:
+1. Historical TURN service credentials and debug payload logging in the MEWconnect repository.
+2. Endpoint-integrity and privacy risks in the companion mobile wallet's remotely configurable backend/service URLs.
+3. A bearer-token code path documented for a local development backend, with a guardrail recommended to prevent accidental use against a remote host.
+
+None of these findings establishes that the user's mnemonic/private key was stolen, that Monarch received a wallet secret, or that a particular person or repository operator caused the incident. Confirming historical TURN credential validity requires the TURN service owner/provider's account and usage logs; this GitHub-only review cannot revoke or verify provider credentials.
